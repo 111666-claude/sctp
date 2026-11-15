@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,31 +22,58 @@ type vNetEnvConfig struct {
 }
 
 type vNetEnv struct {
-	wan                 *vnet.Router
-	net0                *vnet.Net
-	net1                *vnet.Net
+	wan  *vnet.Router
+	net0 *vnet.Net
+	net1 *vnet.Net
+
+	lock                sync.Mutex
 	numToDropData       int
 	numToDropReconfig   int
 	numToDropCookieEcho int
 	numToDropCookieAck  int
+	numToDropShutdown   int
 }
 
 var errSCTPPacketParse = fmt.Errorf("unable to parse SCTP packet")
 
 func (venv *vNetEnv) dropNextDataChunk(numToDrop int) {
+	venv.lock.Lock()
+	defer venv.lock.Unlock()
 	venv.numToDropData = numToDrop
 }
 
 func (venv *vNetEnv) dropNextReconfigChunk(numToDrop int) { // nolint:unused
+	venv.lock.Lock()
+	defer venv.lock.Unlock()
 	venv.numToDropReconfig = numToDrop
 }
 
 func (venv *vNetEnv) dropNextCookieEchoChunk(numToDrop int) {
+	venv.lock.Lock()
+	defer venv.lock.Unlock()
 	venv.numToDropCookieEcho = numToDrop
 }
 
 func (venv *vNetEnv) dropNextCookieAckChunk(numToDrop int) {
+	venv.lock.Lock()
+	defer venv.lock.Unlock()
 	venv.numToDropCookieAck = numToDrop
+}
+
+// dropNextShutdownChunks drops the given number of SHUTDOWN, SHUTDOWN-ACK and
+// SHUTDOWN-COMPLETE chunks. The counter is shared by the three chunk types.
+func (venv *vNetEnv) dropNextShutdownChunks(numToDrop int) {
+	venv.lock.Lock()
+	defer venv.lock.Unlock()
+	venv.numToDropShutdown = numToDrop
+}
+
+// pendingShutdownDrops returns the number of shutdown control chunks still
+// scheduled to be dropped.
+func (venv *vNetEnv) pendingShutdownDrops() int {
+	venv.lock.Lock()
+	defer venv.lock.Unlock()
+	return venv.numToDropShutdown
 }
 
 func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
@@ -75,6 +103,9 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 			if err2 := p.unmarshal(c.UserData()); err2 != nil {
 				panic(errSCTPPacketParse)
 			}
+
+			venv.lock.Lock()
+			defer venv.lock.Unlock()
 
 		loop:
 			for i := 0; i < len(p.chunks); i++ {
@@ -112,6 +143,13 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 						toDrop = true
 						venv.numToDropCookieAck--
 						log.Infof("Chunk filter:  drop %s", chunk.String())
+						break loop
+					}
+				case *chunkShutdown, *chunkShutdownAck, *chunkShutdownComplete:
+					if venv.numToDropShutdown > 0 {
+						toDrop = true
+						venv.numToDropShutdown--
+						log.Infof("Chunk filter:  drop shutdown chunk %T", chunk)
 						break loop
 					}
 				}
@@ -529,7 +567,10 @@ func TestStreamClose(t *testing.T) {
 		<-shutDownClient
 
 		// Check if RECONFIG was actually dropped
-		assert.Equal(t, 0, venv.numToDropReconfig, "should be zero")
+		venv.lock.Lock()
+		reconfigDropsLeft := venv.numToDropReconfig
+		venv.lock.Unlock()
+		assert.Equal(t, 0, reconfigDropsLeft, "should be zero")
 
 		// Sleep enough time for reconfig response to come back
 		time.Sleep(100 * time.Millisecond)

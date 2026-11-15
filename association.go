@@ -421,7 +421,11 @@ func (a *Association) Shutdown(ctx context.Context) error {
 
 	a.lock.Lock()
 
-	if a.inflightQueue.size() == 0 {
+	// Data can still be sitting in the pending queue, not yet moved to the
+	// inflight queue. Only start the shutdown handshake once all queued data
+	// has been committed for transmission and acknowledged; otherwise the
+	// chunks left in the pending queue would never be sent.
+	if a.pendingQueue.size() == 0 && a.inflightQueue.size() == 0 {
 		// No more outstanding, send shutdown.
 		a.willSendShutdown = true
 		a.awakeWriteLoop()
@@ -911,6 +915,11 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 		rawPackets = a.gatherOutboundForwardTSNPackets(rawPackets)
 	case shutdownPending, shutdownSent, shutdownReceived:
 		rawPackets = a.gatherDataPacketsToRetransmit(rawPackets)
+		// Keep draining data that was queued before the shutdown so that
+		// all outstanding user data is delivered, in order, before the
+		// shutdown chunk is sent. No new user data can enter the pending
+		// queue once the association leaves the established state.
+		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets)
 		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets)
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
 		rawPackets, ok = a.gatherOutboundShutdownPackets(rawPackets)
@@ -1734,11 +1743,23 @@ func (a *Association) postprocessSack(state uint32, shouldAwakeWriteLoop bool) {
 		a.log.Tracef("[%s] T3-rtx timer start (pt3)", a.name)
 		a.t3RTX.start(a.rtoMgr.getRTO())
 	case state == shutdownPending:
+		if a.pendingQueue.size() > 0 {
+			// More user data is waiting to be sent. The write loop will
+			// drain it and will re-evaluate once it has been acknowledged.
+			shouldAwakeWriteLoop = true
+			break
+		}
 		// No more outstanding, send shutdown.
 		shouldAwakeWriteLoop = true
 		a.willSendShutdown = true
 		a.setState(shutdownSent)
 	case state == shutdownReceived:
+		if a.pendingQueue.size() > 0 {
+			// More user data is waiting to be sent. The write loop will
+			// drain it and will re-evaluate once it has been acknowledged.
+			shouldAwakeWriteLoop = true
+			break
+		}
 		// No more outstanding, send shutdown ack.
 		shouldAwakeWriteLoop = true
 		a.willSendShutdownAck = true
@@ -1756,8 +1777,12 @@ func (a *Association) handleShutdown(_ *chunkShutdown) {
 
 	switch state {
 	case established:
-		if a.inflightQueue.size() > 0 {
+		// Stay in shutdownReceived until all locally queued data has been
+		// transmitted and acknowledged; the SACK processing will then move
+		// the association to shutdownAckSent.
+		if a.pendingQueue.size() > 0 || a.inflightQueue.size() > 0 {
 			a.setState(shutdownReceived)
+			a.awakeWriteLoop()
 		} else {
 			// No more outstanding, send shutdown ack.
 			a.willSendShutdownAck = true
@@ -1767,10 +1792,24 @@ func (a *Association) handleShutdown(_ *chunkShutdown) {
 		}
 
 		// a.cumulativeTSNAckPoint = c.cumulativeTSNAck
+	case shutdownPending:
+		// A retransmitted SHUTDOWN arrived while locally queued data is
+		// still being drained. Remember the peer's shutdown request; the
+		// association moves to shutdownAckSent once draining completes.
+		a.setState(shutdownReceived)
+		a.awakeWriteLoop()
 	case shutdownSent:
 		a.willSendShutdownAck = true
 		a.setState(shutdownAckSent)
 
+		a.awakeWriteLoop()
+	case shutdownReceived:
+		// Duplicate SHUTDOWN: the shutdown acknowledgement is already
+		// pending or waiting for locally queued data to drain.
+		a.awakeWriteLoop()
+	case shutdownAckSent:
+		// Duplicate SHUTDOWN: retransmit the shutdown acknowledgement.
+		a.willSendShutdownAck = true
 		a.awakeWriteLoop()
 	}
 }
@@ -1794,6 +1833,9 @@ func (a *Association) handleShutdownComplete(_ *chunkShutdownComplete) error {
 		return a.close()
 	}
 
+	// RFC 4960: a SHUTDOWN-COMPLETE in any other state is a duplicate or an
+	// out-of-the-blue chunk; silently ignore it instead of leaving the peer
+	// waiting for a response that will never come.
 	return nil
 }
 
