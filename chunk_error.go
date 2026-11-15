@@ -64,8 +64,28 @@ func (a *chunkError) unmarshal(raw []byte) error {
 			return fmt.Errorf("%w: %v", ErrBuildErrorChunkFailed, err) //nolint:errorlint
 		}
 
+		if e.length() < errorCauseHeaderLength {
+			return fmt.Errorf("%w: %v", ErrBuildErrorChunkFailed, ErrInvalidSCTPChunk)
+		}
+
 		offset += int(e.length())
 		a.errorCauses = append(a.errorCauses, e)
+	}
+
+	if remaining := len(raw) - offset; remaining != 0 {
+		// RFC 9260 §3.2: chunks are padded with zero bytes to a multiple of
+		// four. Any other trailing bytes are a truncated error cause.
+		if remaining >= errorCauseHeaderLength {
+			return fmt.Errorf("%w: %w: %d trailing bytes cannot hold an error cause",
+				ErrBuildErrorChunkFailed, ErrErrorCauseTooShort, remaining)
+		}
+
+		for _, b := range raw[offset:] {
+			if b != 0 {
+				return fmt.Errorf("%w: %w: non-zero padding byte after error causes",
+					ErrBuildErrorChunkFailed, ErrInvalidSCTPChunk)
+			}
+		}
 	}
 
 	return nil

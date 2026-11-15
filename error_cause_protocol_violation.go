@@ -36,6 +36,9 @@ var (
 )
 
 func (e *errorCauseProtocolViolation) marshal() ([]byte, error) {
+	if e.code == 0 {
+		e.code = protocolViolation
+	}
 	e.raw = e.additionalInformation
 
 	return e.errorCauseHeader.marshal()

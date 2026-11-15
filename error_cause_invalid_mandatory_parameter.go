@@ -9,6 +9,10 @@ type errorCauseInvalidMandatoryParameter struct {
 }
 
 func (e *errorCauseInvalidMandatoryParameter) marshal() ([]byte, error) {
+	if e.code == 0 {
+		e.code = invalidMandatoryParameter
+	}
+
 	return e.errorCauseHeader.marshal()
 }
 

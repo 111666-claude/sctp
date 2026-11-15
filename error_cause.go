@@ -30,6 +30,11 @@ var (
 func buildErrorCause(raw []byte) (errorCause, error) {
 	var errCause errorCause
 
+	if len(raw) < errorCauseHeaderLength {
+		return nil, fmt.Errorf("%w: raw only %d bytes, %d is the minimum length",
+			ErrErrorCauseTooShort, len(raw), errorCauseHeaderLength)
+	}
+
 	c := errorCauseCode(binary.BigEndian.Uint16(raw[0:]))
 	switch c {
 	case invalidMandatoryParameter:

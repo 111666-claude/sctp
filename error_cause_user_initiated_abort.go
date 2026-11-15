@@ -33,7 +33,9 @@ type errorCauseUserInitiatedAbort struct {
 }
 
 func (e *errorCauseUserInitiatedAbort) marshal() ([]byte, error) {
-	e.code = userInitiatedAbort
+	if e.code == 0 {
+		e.code = userInitiatedAbort
+	}
 	e.errorCauseHeader.raw = e.upperLayerAbortReason
 
 	return e.errorCauseHeader.marshal()

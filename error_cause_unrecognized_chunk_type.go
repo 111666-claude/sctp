@@ -10,7 +10,9 @@ type errorCauseUnrecognizedChunkType struct {
 }
 
 func (e *errorCauseUnrecognizedChunkType) marshal() ([]byte, error) {
-	e.code = unrecognizedChunkType
+	if e.code == 0 {
+		e.code = unrecognizedChunkType
+	}
 	e.errorCauseHeader.raw = e.unrecognizedChunk
 
 	return e.errorCauseHeader.marshal()
