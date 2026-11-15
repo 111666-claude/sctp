@@ -4,6 +4,7 @@
 package sctp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -54,6 +55,7 @@ var (
 	ErrOutboundPacketTooLarge = errors.New("outbound packet larger than maximum message size")
 	ErrStreamClosed           = errors.New("stream closed")
 	ErrReadDeadlineExceeded   = fmt.Errorf("read deadline exceeded: %w", os.ErrDeadlineExceeded)
+	ErrNilContext             = errors.New("context must not be nil")
 )
 
 // Stream represents an SCTP stream.
@@ -309,8 +311,36 @@ func (s *Stream) Write(payload []byte) (n int, err error) {
 	return s.WriteSCTP(payload, ppi)
 }
 
+// WriteContext behaves like Write but additionally honors ctx. Canceling ctx
+// only cancels this single write: it does not change the stream's write
+// deadline. If the whole message has already been queued for sending, the
+// write succeeds even if ctx is canceled afterwards; a cancellation can never
+// turn a partially or fully queued message into an error.
+func (s *Stream) WriteContext(ctx context.Context, payload []byte) (int, error) {
+	ppi := PayloadProtocolIdentifier(atomic.LoadUint32((*uint32)(&s.defaultPayloadType)))
+
+	return s.WriteSCTPContext(ctx, payload, ppi)
+}
+
 // WriteSCTP writes len(payload) bytes from payload to the DTLS connection.
 func (s *Stream) WriteSCTP(payload []byte, ppi PayloadProtocolIdentifier) (int, error) {
+	return s.WriteSCTPContext(context.Background(), payload, ppi)
+}
+
+// WriteSCTPContext behaves like WriteSCTP but additionally honors ctx. A
+// canceled ctx only aborts this single write while it is waiting for send
+// space; it never modifies the stream's write deadline.
+//
+// If ctx is canceled before the message is queued, no fragment is queued and
+// the stream sequence number, message identifier and buffered amount are
+// rolled back as if the write had never happened. Once the complete message
+// has been committed to the association's send queue, nil is returned and the
+// message keeps its message boundaries and counters, regardless of ctx.
+func (s *Stream) WriteSCTPContext(ctx context.Context, payload []byte, ppi PayloadProtocolIdentifier) (int, error) {
+	if ctx == nil {
+		return 0, ErrNilContext
+	}
+
 	maxMessageSize := s.association.MaxMessageSize()
 	if len(payload) > int(maxMessageSize) {
 		return 0, fmt.Errorf("%w: %v", ErrOutboundPacketTooLarge, maxMessageSize)
@@ -320,14 +350,17 @@ func (s *Stream) WriteSCTP(payload []byte, ppi PayloadProtocolIdentifier) (int, 
 		return 0, ErrStreamClosed
 	}
 
-	// The send can fail after packetize has taken a sequence number: on a blockWrite
-	// timeout, or when Close wins the race to the pending queue. rollbackWrite then
-	// gives the number back, which is only safe if no other write on this stream
-	// took a later one in the meantime, so writes are serialized in every mode.
+	// The send can fail after packetize has taken a sequence number: on a
+	// blockWrite timeout or context cancel, or when Close wins the race to the
+	// pending queue. rollbackWrite then gives the number back, which is only
+	// safe if no other write on this stream took a later one in the meantime,
+	// so writes are serialized in every mode.
 	s.writeLock.Lock()
 	chunks, unordered := s.packetize(payload, ppi)
+	ctx, stop := s.withWriteDeadline(ctx)
+	defer stop()
 	n := len(payload)
-	err := s.association.sendPayloadData(s.writeDeadline.Context(), chunks)
+	err := s.association.sendPayloadData(ctx, chunks)
 	if err != nil {
 		s.rollbackWrite(chunks, unordered, uint64(len(payload)))
 		n = 0
@@ -335,6 +368,25 @@ func (s *Stream) WriteSCTP(payload []byte, ppi PayloadProtocolIdentifier) (int, 
 	s.writeLock.Unlock()
 
 	return n, err
+}
+
+// withWriteDeadline returns a context canceled when either ctx or the
+// stream-wide write deadline is done. The stream deadline is shared state and
+// must never be mutated by a per-write cancellation, so the two are merged
+// into a derived context instead. The returned stop function releases the
+// merge's resources and is safe to call after the write has finished.
+func (s *Stream) withWriteDeadline(ctx context.Context) (context.Context, func()) {
+	deadlineCtx := s.writeDeadline.Context()
+
+	merged, cancel := context.WithCancelCause(ctx)
+	stopAfterFunc := context.AfterFunc(deadlineCtx, func() {
+		cancel(context.Cause(deadlineCtx))
+	})
+
+	return merged, func() {
+		stopAfterFunc()
+		cancel(context.Canceled)
+	}
 }
 
 // rollbackWrite only undoes counters if the write still belongs to this association generation.
