@@ -10,9 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// testMaxMIDEntries is the reassembly queue MID descriptor limit used by the
+// reassembly queue unit tests.
+const testMaxMIDEntries = 1024
+
 func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	t.Run("ordered fragments", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -54,7 +58,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered fragments", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -110,7 +114,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered and unordered in the mix", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -168,7 +172,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("unordered complete skips incomplete", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -231,7 +235,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ignores chunk with wrong SI", func(t *testing.T) {
-		rq := newReassemblyQueue(123)
+		rq := newReassemblyQueue(123, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -254,7 +258,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ignores chunk with stale SSN", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		rq.nextSSN = 7 // forcibly set expected SSN to 7
 
 		orgPpi := PayloadTypeWebRTCBinary
@@ -277,7 +281,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("should fail to read incomplete chunk", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -303,7 +307,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("should fail to read if the next SSN is not ready", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -330,7 +334,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("detect buffer too short", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		for _, chunk := range []*chunkPayloadData{
@@ -374,7 +378,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("forwardTSN for ordered fragments", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -426,7 +430,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("forwardTSN for unordered fragments", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -483,7 +487,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("fragmented and unfragmented chunks with the same ssn", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -521,7 +525,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("i-data ordered fragments by fsn", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		chunk1 := &chunkPayloadData{
@@ -560,7 +564,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data ignores duplicate fsn with different tsn", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete := rq.push(&chunkPayloadData{
@@ -611,7 +615,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data ignores stale incomplete mid after read advances nextMID", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete, err := rq.pushWithError(&chunkPayloadData{
@@ -676,7 +680,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data ignores stale complete mid after read advances nextMID", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete, err := rq.pushWithError(&chunkPayloadData{
@@ -720,7 +724,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("unordered i-data ignores duplicate fsn with different tsn", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete := rq.push(&chunkPayloadData{
@@ -788,7 +792,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("forwardTSN for ordered i-data drops incomplete mids and advances nextMID", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete := rq.push(&chunkPayloadData{
@@ -839,7 +843,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data ignores stale mids after forwardTSN advances nextMID", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		rq.forwardTSNForOrderedMID(1)
@@ -902,7 +906,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("forwardTSN for unordered i-data keeps complete mids and drops old incomplete mids", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete := rq.push(&chunkPayloadData{
@@ -990,15 +994,15 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data rejects new mids after descriptor limit", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
-		for i := range maxReassemblyQueueMIDEntries {
+		for i := range testMaxMIDEntries {
 			complete, err := rq.pushWithError(&chunkPayloadData{
 				iData:                  true,
-				messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by testMaxMIDEntries
 				fragmentSequenceNumber: 0,
 				beginningFragment:      true,
-				tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by testMaxMIDEntries
 				streamIdentifier:       0,
 				payloadType:            PayloadTypeWebRTCBinary,
 			})
@@ -1011,7 +1015,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 			messageIdentifier:      0,
 			fragmentSequenceNumber: 1,
 			endingFragment:         true,
-			tsn:                    maxReassemblyQueueMIDEntries + 1,
+			tsn:                    testMaxMIDEntries + 1,
 			streamIdentifier:       0,
 			payloadType:            PayloadTypeWebRTCBinary,
 		})
@@ -1020,22 +1024,22 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 
 		complete, err = rq.pushWithError(&chunkPayloadData{
 			iData:                  true,
-			messageIdentifier:      maxReassemblyQueueMIDEntries,
+			messageIdentifier:      testMaxMIDEntries,
 			fragmentSequenceNumber: 0,
 			beginningFragment:      true,
-			tsn:                    maxReassemblyQueueMIDEntries + 2,
+			tsn:                    testMaxMIDEntries + 2,
 			streamIdentifier:       0,
 			payloadType:            PayloadTypeWebRTCBinary,
 		})
 		assert.ErrorIs(t, err, errReassemblyQueueMIDLimitExceeded)
 		assert.False(t, complete, "new MID should be rejected")
-		assert.Len(t, rq.orderedMIDMap, maxReassemblyQueueMIDEntries)
-		assert.Len(t, rq.orderedMID, maxReassemblyQueueMIDEntries)
+		assert.Len(t, rq.orderedMIDMap, testMaxMIDEntries)
+		assert.Len(t, rq.orderedMID, testMaxMIDEntries)
 		assert.Equal(t, 0, rq.getNumBytes(), "zero-byte fragments must not hide descriptor growth")
 	})
 
 	t.Run("ordered i-data inserts new mids in order", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
 		for i, mid := range []uint32{3, 1, 2} {
 			complete, err := rq.pushWithError(&chunkPayloadData{
@@ -1060,16 +1064,16 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("unordered i-data rejects new incomplete mids after descriptor limit", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
-		for i := range maxReassemblyQueueMIDEntries {
+		for i := range testMaxMIDEntries {
 			complete, err := rq.pushWithError(&chunkPayloadData{
 				iData:                  true,
 				unordered:              true,
-				messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by testMaxMIDEntries
 				fragmentSequenceNumber: 0,
 				beginningFragment:      true,
-				tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by testMaxMIDEntries
 				streamIdentifier:       0,
 				payloadType:            PayloadTypeWebRTCBinary,
 			})
@@ -1080,32 +1084,32 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		complete, err := rq.pushWithError(&chunkPayloadData{
 			iData:                  true,
 			unordered:              true,
-			messageIdentifier:      maxReassemblyQueueMIDEntries,
+			messageIdentifier:      testMaxMIDEntries,
 			fragmentSequenceNumber: 0,
 			beginningFragment:      true,
-			tsn:                    maxReassemblyQueueMIDEntries + 1,
+			tsn:                    testMaxMIDEntries + 1,
 			streamIdentifier:       0,
 			payloadType:            PayloadTypeWebRTCBinary,
 		})
 		assert.ErrorIs(t, err, errReassemblyQueueMIDLimitExceeded)
 		assert.False(t, complete, "new MID should be rejected")
-		assert.Len(t, rq.unorderedMIDMap, maxReassemblyQueueMIDEntries)
+		assert.Len(t, rq.unorderedMIDMap, testMaxMIDEntries)
 		assert.Len(t, rq.unorderedMID, 0)
 		assert.Equal(t, 0, rq.getNumBytes(), "zero-byte fragments must not hide descriptor growth")
 	})
 
 	t.Run("unordered i-data counts complete queued mids against descriptor limit", func(t *testing.T) {
-		rq := newReassemblyQueue(0)
+		rq := newReassemblyQueue(0, testMaxMIDEntries)
 
-		for i := range maxReassemblyQueueMIDEntries {
+		for i := range testMaxMIDEntries {
 			complete, err := rq.pushWithError(&chunkPayloadData{
 				iData:                  true,
 				unordered:              true,
-				messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by testMaxMIDEntries
 				fragmentSequenceNumber: 0,
 				beginningFragment:      true,
 				endingFragment:         true,
-				tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by testMaxMIDEntries
 				streamIdentifier:       0,
 				payloadType:            PayloadTypeWebRTCBinary,
 			})
@@ -1116,18 +1120,18 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		complete, err := rq.pushWithError(&chunkPayloadData{
 			iData:                  true,
 			unordered:              true,
-			messageIdentifier:      maxReassemblyQueueMIDEntries,
+			messageIdentifier:      testMaxMIDEntries,
 			fragmentSequenceNumber: 0,
 			beginningFragment:      true,
 			endingFragment:         true,
-			tsn:                    maxReassemblyQueueMIDEntries + 1,
+			tsn:                    testMaxMIDEntries + 1,
 			streamIdentifier:       0,
 			payloadType:            PayloadTypeWebRTCBinary,
 		})
 		assert.ErrorIs(t, err, errReassemblyQueueMIDLimitExceeded)
 		assert.False(t, complete, "new MID should be rejected")
 		assert.Len(t, rq.unorderedMIDMap, 0)
-		assert.Len(t, rq.unorderedMID, maxReassemblyQueueMIDEntries)
+		assert.Len(t, rq.unorderedMID, testMaxMIDEntries)
 		assert.Equal(t, 0, rq.getNumBytes(), "zero-byte messages must not hide descriptor growth")
 	})
 }

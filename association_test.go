@@ -1127,13 +1127,15 @@ func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
 	assoc.payloadQueue.init(0)
 	assoc.setState(established)
 
-	for i := range maxReassemblyQueueMIDEntries {
+	midLimit := getMaxReassemblyQueueMIDEntries(assoc.maxReceiveBufferSize)
+
+	for i := range midLimit {
 		packets := assoc.handleData(&chunkPayloadData{
 			iData:                  true,
-			messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+			messageIdentifier:      i,
 			fragmentSequenceNumber: 0,
 			beginningFragment:      true,
-			tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+			tsn:                    i + 1,
 			streamIdentifier:       1,
 			payloadType:            PayloadTypeWebRTCBinary,
 		})
@@ -1143,10 +1145,10 @@ func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
 
 	packets := assoc.handleData(&chunkPayloadData{
 		iData:                  true,
-		messageIdentifier:      maxReassemblyQueueMIDEntries,
+		messageIdentifier:      midLimit,
 		fragmentSequenceNumber: 0,
 		beginningFragment:      true,
-		tsn:                    maxReassemblyQueueMIDEntries + 1,
+		tsn:                    midLimit + 1,
 		streamIdentifier:       1,
 		payloadType:            PayloadTypeWebRTCBinary,
 	})
@@ -1156,6 +1158,71 @@ func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
 	cause, ok := assoc.willSendAbortCause.(*errorCauseProtocolViolation)
 	require.True(t, ok, "abort cause should be a protocol violation")
 	assert.Equal(t, errReassemblyQueueMIDLimitExceeded.Error(), string(cause.additionalInformation))
+}
+
+func TestGetMaxReassemblyQueueMIDEntries(t *testing.T) {
+	assert.Equal(t, uint32(2048), getMaxReassemblyQueueMIDEntries(131072))
+	assert.Equal(t, uint32(16384), getMaxReassemblyQueueMIDEntries(initialRecvBufSize))
+	assert.Equal(t, uint32(1), getMaxReassemblyQueueMIDEntries(0))
+	assert.Equal(t, uint32(1), getMaxReassemblyQueueMIDEntries(reassemblyQueueMIDEntryBudget-1))
+}
+
+// TestAssociationInterleavingMIDLimitMatchesReceiveBuffer verifies that the
+// reassembly queue MID capacity tracks the configured receive buffer budget:
+// with a 131072 byte budget both ordered and unordered interleaved inputs
+// must accommodate 2048 incomplete message identifiers and reject the 2049th.
+func TestAssociationInterleavingMIDLimitMatchesReceiveBuffer(t *testing.T) {
+	const (
+		recvBufferSize = 131072
+		expectedMIDs   = 2048
+	)
+
+	require.Equal(t, uint32(expectedMIDs), getMaxReassemblyQueueMIDEntries(recvBufferSize))
+
+	run := func(t *testing.T, unordered bool) {
+		t.Helper()
+
+		assoc := createTestAssociation(t, Config{MaxReceiveBufferSize: recvBufferSize})
+		assoc.useInterleaving = true
+		assoc.payloadQueue.init(0)
+		assoc.setState(established)
+
+		for i := range expectedMIDs {
+			packets := assoc.handleData(&chunkPayloadData{
+				iData:                  true,
+				unordered:              unordered,
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by expectedMIDs
+				fragmentSequenceNumber: 0,
+				beginningFragment:      true,
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by expectedMIDs
+				streamIdentifier:       1,
+				payloadType:            PayloadTypeWebRTCBinary,
+			})
+			require.Nil(t, packets)
+			require.False(t, assoc.willSendAbort,
+				"association should remain open at MID %d within the budget-derived limit", i)
+		}
+
+		packets := assoc.handleData(&chunkPayloadData{
+			iData:                  true,
+			unordered:              unordered,
+			messageIdentifier:      expectedMIDs,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    expectedMIDs + 1,
+			streamIdentifier:       1,
+			payloadType:            PayloadTypeWebRTCBinary,
+		})
+		require.Nil(t, packets)
+		require.True(t, assoc.willSendAbort, "association should abort on the first MID over the limit")
+
+		cause, ok := assoc.willSendAbortCause.(*errorCauseProtocolViolation)
+		require.True(t, ok, "abort cause should be a protocol violation")
+		assert.Equal(t, errReassemblyQueueMIDLimitExceeded.Error(), string(cause.additionalInformation))
+	}
+
+	t.Run("ordered", func(t *testing.T) { run(t, false) })
+	t.Run("unordered", func(t *testing.T) { run(t, true) })
 }
 
 func TestAssocReliable(t *testing.T) { //nolint:maintidx
