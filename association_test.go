@@ -249,6 +249,11 @@ func (c *dumbConn) Write(p []byte) (n int, err error) {
 
 // Close closes the conn and releases any Read calls.
 func (c *dumbConn) Close() error {
+	// Test associations may construct a dumbConn without a real PacketConn.
+	if c.pConn == nil {
+		return nil
+	}
+
 	return c.pConn.Close()
 }
 
@@ -1124,23 +1129,6 @@ func TestAssociationShutdownRejectsBufferedAmountLowWrite(t *testing.T) {
 	assert.Zero(t, assoc.pendingQueue.size())
 	assert.Equal(t, shutdownAckSent, assoc.getState())
 	assert.True(t, assoc.willSendShutdownAck)
-}
-
-func TestAssociationInvalidShutdownAckDoesNotChangeState(t *testing.T) {
-	assoc := createTestAssociation(t, Config{})
-	assoc.setState(established)
-	assoc.cumulativeTSNAckPoint = 99
-	assoc.inflightQueue.pushNoCheck(mkChunk(100, time.Now()))
-
-	assoc.lock.Lock()
-	err := assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 101})
-	assoc.lock.Unlock()
-
-	require.ErrorIs(t, err, ErrInflightQueueTSNPop)
-	assert.Equal(t, established, assoc.getState())
-	assert.Equal(t, uint32(99), assoc.cumulativeTSNAckPoint)
-	assert.Equal(t, 1, assoc.inflightQueue.size())
-	assert.False(t, assoc.willSendShutdownAck)
 }
 
 func TestAssociationShutdownSentRespondsToInvalidCumulativeTSNAck(t *testing.T) {

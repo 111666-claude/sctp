@@ -265,6 +265,10 @@ type Association struct {
 	willSendShutdown         bool
 	willSendShutdownAck      bool
 	willSendShutdownComplete bool
+	// shutdownCompletePending marks the association after SHUTDOWN ACK has been
+	// processed. Late DATA, control chunks and timer events must not restart any
+	// shutdown traffic once the terminal SHUTDOWN COMPLETE is pending or sent.
+	shutdownCompletePending bool
 
 	willSendAbort      bool
 	willSendAbortCause errorCause
@@ -1004,24 +1008,28 @@ func (a *Association) sendCookieEcho() error {
 func (a *Association) Shutdown(ctx context.Context) error {
 	a.log.Debugf("[%s] closing association..", a.name)
 
-	state := a.getState()
+	a.lock.Lock()
 
+	state := a.getState()
 	if state != established {
+		a.lock.Unlock()
+
 		return fmt.Errorf("%w: shutdown %s", ErrShutdownNonEstablished, a.name)
 	}
 
 	// Attempt a graceful shutdown.
 	a.setState(shutdownPending)
+	// Blocked writers must not wait for data that can no longer be accepted:
+	// shutdown rejects new writes, so release them before draining the queues.
+	a.unblockPendingWrites()
 
-	a.lock.Lock()
-
-	if a.inflightQueue.size() == 0 {
-		// No more outstanding, send shutdown.
+	if !a.hasPendingOrInflightData() {
+		// No more queued or outstanding, send shutdown.
 		a.willSendShutdown = true
-		a.awakeWriteLoop()
 		a.setState(shutdownSent)
 	}
 
+	a.awakeWriteLoop()
 	a.lock.Unlock()
 
 	select {
@@ -1381,19 +1389,7 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(
 	}
 
 	if len(sisToReset) > 0 || a.willRetransmitReconfig { //nolint:nestif
-		if a.willRetransmitReconfig {
-			a.willRetransmitReconfig = false
-			a.log.Debugf("[%s] retransmit %d RECONFIG chunk(s)", a.name, len(a.reconfigs))
-			for _, c := range a.reconfigs {
-				p := a.createPacket([]chunk{c})
-				raw, err := a.marshalPacket(p)
-				if err != nil {
-					a.log.Warnf("[%s] failed to serialize a RECONFIG packet to be retransmitted", a.name)
-				} else {
-					rawPackets = append(rawPackets, raw)
-				}
-			}
-		}
+		rawPackets = a.gatherOutboundReconfigPackets(rawPackets)
 
 		if len(sisToReset) > 0 {
 			rsn := a.generateNextRSN()
@@ -1419,6 +1415,28 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(
 
 		if len(a.reconfigs) > 0 {
 			a.tReconfig.start(a.rtoMgr.getRTO())
+		}
+	}
+
+	return rawPackets
+}
+
+// gatherOutboundReconfigPackets appends retransmitted RECONFIG chunks.
+// The caller should hold the lock.
+func (a *Association) gatherOutboundReconfigPackets(rawPackets [][]byte) [][]byte {
+	if !a.willRetransmitReconfig {
+		return rawPackets
+	}
+
+	a.willRetransmitReconfig = false
+	a.log.Debugf("[%s] retransmit %d RECONFIG chunk(s)", a.name, len(a.reconfigs))
+	for _, c := range a.reconfigs {
+		p := a.createPacket([]chunk{c})
+		raw, err := a.marshalPacket(p)
+		if err != nil {
+			a.log.Warnf("[%s] failed to serialize a RECONFIG packet to be retransmitted", a.name)
+		} else {
+			rawPackets = append(rawPackets, raw)
 		}
 	}
 
@@ -1595,6 +1613,33 @@ func (a *Association) gatherOutboundShutdownPackets(rawPackets [][]byte) ([][]by
 	ok := true
 
 	switch {
+	case a.willSendShutdownComplete:
+		a.willSendShutdownComplete = false
+		a.willSendShutdownAck = false
+		a.willSendShutdown = false
+
+		shutdownComplete := &chunkShutdownComplete{}
+
+		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdownComplete}))
+		if err != nil {
+			a.log.Warnf("[%s] failed to serialize a ShutdownComplete packet", a.name)
+		} else {
+			rawPackets = append(rawPackets, raw)
+			ok = false
+		}
+	case a.willSendShutdownAck:
+		a.willSendShutdownAck = false
+		a.willSendShutdown = false
+
+		shutdownAck := &chunkShutdownAck{}
+
+		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdownAck}))
+		if err != nil {
+			a.log.Warnf("[%s] failed to serialize a ShutdownAck packet", a.name)
+		} else {
+			a.t2Shutdown.start(a.rtoMgr.getRTO())
+			rawPackets = append(rawPackets, raw)
+		}
 	case a.willSendShutdown:
 		a.willSendShutdown = false
 
@@ -1608,30 +1653,6 @@ func (a *Association) gatherOutboundShutdownPackets(rawPackets [][]byte) ([][]by
 		} else {
 			a.t2Shutdown.start(a.rtoMgr.getRTO())
 			rawPackets = append(rawPackets, raw)
-		}
-	case a.willSendShutdownAck:
-		a.willSendShutdownAck = false
-
-		shutdownAck := &chunkShutdownAck{}
-
-		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdownAck}))
-		if err != nil {
-			a.log.Warnf("[%s] failed to serialize a ShutdownAck packet", a.name)
-		} else {
-			a.t2Shutdown.start(a.rtoMgr.getRTO())
-			rawPackets = append(rawPackets, raw)
-		}
-	case a.willSendShutdownComplete:
-		a.willSendShutdownComplete = false
-
-		shutdownComplete := &chunkShutdownComplete{}
-
-		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdownComplete}))
-		if err != nil {
-			a.log.Warnf("[%s] failed to serialize a ShutdownComplete packet", a.name)
-		} else {
-			rawPackets = append(rawPackets, raw)
-			ok = false
 		}
 	}
 
@@ -1655,12 +1676,12 @@ func (a *Association) gatherAbortPacket() ([]byte, error) {
 	return raw, err
 }
 
-// gatherOutbound gathers outgoing packets. The returned bool value set to
-// false means the association should be closed down after the final send.
-func (a *Association) gatherOutbound() ([][]byte, bool) {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-
+// gatherOutboundPriorityPackets returns shutdown traffic that must jump the
+// control and DATA queues. The final bool reports whether the caller must
+// return immediately, because the packets either terminate the association
+// or already represent the complete response for this gather cycle.
+// The caller should hold the lock.
+func (a *Association) gatherOutboundPriorityPackets() ([][]byte, bool, bool) {
 	if a.willSendAbort {
 		pkt, err := a.gatherAbortPacket()
 		if err != nil {
@@ -1670,13 +1691,51 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 			// (even though it failed) to avoid unnecessary delays.
 			a.abortSentOnce.Do(func() { close(a.abortSentCh) })
 
-			return nil, false
+			return nil, false, true
 		}
 
-		return [][]byte{pkt}, false
+		return [][]byte{pkt}, false, true
 	}
 
-	rawPackets := [][]byte{}
+	// Once SHUTDOWN ACK has been received, SHUTDOWN COMPLETE is the only
+	// protocol response left to send. Do not let queued control or DATA
+	// traffic delay the terminal response.
+	if a.willSendShutdownComplete {
+		rawPackets, ok := a.gatherOutboundShutdownPackets(nil)
+
+		return rawPackets, ok, true
+	}
+
+	// A retransmitted or crossed SHUTDOWN must not sit behind unrelated
+	// control traffic while the peer is waiting for SHUTDOWN ACK.
+	if a.getState() == shutdownAckSent && a.willSendShutdownAck {
+		rawPackets, ok := a.gatherOutboundShutdownPackets(nil)
+
+		return rawPackets, ok, false
+	}
+
+	// DATA received after sending SHUTDOWN requires an immediate updated
+	// SHUTDOWN response, plus a SACK when gaps or duplicates require one.
+	if a.getState() == shutdownSent && a.willSendShutdown {
+		rawPackets := a.gatherOutboundSackPackets(nil)
+		rawPackets, ok := a.gatherOutboundShutdownPackets(rawPackets)
+
+		return rawPackets, ok, false
+	}
+
+	return nil, true, false
+}
+
+// gatherOutbound gathers outgoing packets. The returned bool value set to
+// false means the association should be closed down after the final send.
+func (a *Association) gatherOutbound() ([][]byte, bool) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	rawPackets, ok, terminal := a.gatherOutboundPriorityPackets()
+	if terminal {
+		return rawPackets, ok
+	}
 
 	if a.controlQueue.size() > 0 {
 		for _, p := range a.controlQueue.popAll() {
@@ -1692,8 +1751,6 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 
 	state := a.getState()
 
-	ok := true
-
 	switch state {
 	case established:
 		budgetUnits := a.tlrCurrentBurstBudgetScaledLocked()
@@ -1706,17 +1763,27 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 		// control traffic shouldn't be limited.
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
 		rawPackets = a.gatherOutboundForwardTSNPackets(rawPackets)
-	case shutdownPending, shutdownSent, shutdownReceived:
+	case shutdownPending, shutdownReceived:
 		budgetUnits := a.tlrCurrentBurstBudgetScaledLocked()
 		consumed := false
 
+		// DATA accepted before shutdown must be transmitted in order before any
+		// SHUTDOWN or SHUTDOWN ACK leaves the association.
 		rawPackets = a.gatherDataPacketsToRetransmit(rawPackets, &budgetUnits, &consumed)
+		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets, &budgetUnits, &consumed)
 		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets, &budgetUnits, &consumed)
+		a.advanceShutdownAfterDataDrain(state)
 
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
+		rawPackets = a.gatherOutboundForwardTSNPackets(rawPackets)
 		rawPackets, ok = a.gatherOutboundShutdownPackets(rawPackets)
+	case shutdownSent:
+		rawPackets = a.gatherOutboundSackPackets(rawPackets)
+		rawPackets, ok = a.gatherOutboundShutdownPackets(rawPackets)
+		rawPackets = a.gatherOutboundReconfigPackets(rawPackets)
 	case shutdownAckSent:
 		rawPackets, ok = a.gatherOutboundShutdownPackets(rawPackets)
+		rawPackets = a.gatherOutboundReconfigPackets(rawPackets)
 	}
 
 	return rawPackets, ok
@@ -2324,10 +2391,18 @@ func isDataReceiveState(state uint32) bool {
 	return state == established || state == shutdownPending || state == shutdownSent
 }
 
+// canHandleData reports whether an inbound DATA chunk may still affect
+// association state. Once SHUTDOWN COMPLETE is pending, late DATA must be
+// discarded without restarting any shutdown traffic.
+// The caller should hold the lock.
+func (a *Association) canHandleData(state uint32) bool {
+	return !a.shutdownCompletePending && isDataReceiveState(state)
+}
+
 // The caller should hold the lock.
 func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	state := a.getState()
-	if !isDataReceiveState(state) {
+	if !a.canHandleData(state) {
 		return nil
 	}
 
@@ -3074,21 +3149,47 @@ func (a *Association) postprocessSack(state uint32, shouldAwakeWriteLoop bool) {
 		// Start timer. (noop if already started)
 		a.log.Tracef("[%s] T3-rtx timer start (pt3)", a.name)
 		a.t3RTX.start(a.rtoMgr.getRTO())
-	case state == shutdownPending:
-		// No more outstanding, send shutdown.
+	case a.pendingQueue.size() > 0:
+		// The SACK opened room for DATA accepted before shutdown started.
 		shouldAwakeWriteLoop = true
-		a.willSendShutdown = true
-		a.setState(shutdownSent)
-	case state == shutdownReceived:
-		// No more outstanding, send shutdown ack.
-		shouldAwakeWriteLoop = true
-		a.willSendShutdownAck = true
-		a.setState(shutdownAckSent)
+	default:
+		// No more queued or outstanding DATA; advance shutdown if needed.
+		if a.advanceShutdownAfterDataDrain(state) {
+			shouldAwakeWriteLoop = true
+		}
 	}
 
 	if shouldAwakeWriteLoop {
 		a.awakeWriteLoop()
 	}
+}
+
+// advanceShutdownAfterDataDrain moves the shutdown handshake forward once all
+// DATA accepted before shutdown has been queued for transmission and
+// acknowledged. It reports whether the state changed.
+// The caller should hold the lock.
+func (a *Association) advanceShutdownAfterDataDrain(state uint32) bool {
+	if a.hasPendingOrInflightData() {
+		return false
+	}
+
+	switch state {
+	case shutdownPending:
+		a.willSendShutdown = true
+		a.setState(shutdownSent)
+	case shutdownReceived:
+		a.willSendShutdownAck = true
+		a.setState(shutdownAckSent)
+	default:
+		return false
+	}
+
+	return true
+}
+
+// The caller should hold the lock.
+func (a *Association) hasPendingOrInflightData() bool {
+	return a.pendingQueue.size() > 0 || a.inflightQueue.size() > 0
 }
 
 // processShutdownAcknowledgement processes the Cumulative TSN Ack carried by
@@ -3119,10 +3220,64 @@ func (a *Association) processShutdownAcknowledgement(c *chunkShutdown) error {
 	return nil
 }
 
+func isShutdownHandleState(state uint32) bool {
+	switch state {
+	case established, shutdownPending, shutdownReceived, shutdownSent:
+		return true
+	default:
+		return false
+	}
+}
+
+func entersShutdownReceived(state uint32) bool {
+	return state == established || state == shutdownPending
+}
+
+// retransmitShutdownAck schedules another SHUTDOWN ACK in response to a
+// retransmitted SHUTDOWN while the association is in SHUTDOWN-ACK-SENT.
 // The caller should hold the lock.
-func (a *Association) handleShutdown(chunk *chunkShutdown) error {
+func (a *Association) retransmitShutdownAck() {
+	if a.shutdownCompletePending {
+		return
+	}
+
+	a.t2Shutdown.stop()
+	a.willSendShutdown = false
+	a.willSendShutdownAck = true
+	a.awakeWriteLoop()
+}
+
+// The caller should hold the lock.
+func (a *Association) finishShutdownHandling(state uint32) {
+	switch state {
+	case established, shutdownPending, shutdownReceived:
+		if a.hasPendingOrInflightData() {
+			a.setState(shutdownReceived)
+			if a.pendingQueue.size() > 0 {
+				a.awakeWriteLoop()
+			}
+		} else {
+			// No more queued or outstanding DATA, send shutdown ack.
+			a.willSendShutdownAck = true
+			a.setState(shutdownAckSent)
+
+			a.awakeWriteLoop()
+		}
+	}
+}
+
+// The caller should hold the lock.
+func (a *Association) handleShutdown(shutdown *chunkShutdown) error {
+	if a.shutdownCompletePending {
+		return nil
+	}
+
 	state := a.getState()
-	if state != established && state != shutdownReceived && state != shutdownSent {
+	if state == shutdownAckSent {
+		// Continue responding to retransmitted SHUTDOWN chunks after reaching
+		// SHUTDOWN-ACK-SENT, as required by RFC 9260 Section 9.2.
+		a.retransmitShutdownAck()
+
 		return nil
 	}
 
@@ -3141,14 +3296,18 @@ func (a *Association) handleShutdown(chunk *chunkShutdown) error {
 		return nil
 	}
 
-	if state == established {
+	if !isShutdownHandleState(state) {
+		return nil
+	}
+
+	if entersShutdownReceived(state) {
 		// Reject new user DATA before acknowledgement processing can release
 		// a.lock and invoke a stream's OnBufferedAmountLow callback.
 		a.setState(shutdownReceived)
 	}
 
 	previousCumulativeTSNAckPoint := a.cumulativeTSNAckPoint
-	if err := a.processShutdownAcknowledgement(chunk); err != nil {
+	if err := a.processShutdownAcknowledgement(shutdown); err != nil {
 		// Invalid acknowledgement fields are rejected before the transmit
 		// acknowledgement point advances. Restore the pre-SHUTDOWN state so a
 		// malformed chunk cannot strand the association in SHUTDOWN-RECEIVED.
@@ -3159,18 +3318,10 @@ func (a *Association) handleShutdown(chunk *chunkShutdown) error {
 		return err
 	}
 
-	switch state {
-	case established, shutdownReceived:
-		if a.inflightQueue.size() > 0 {
-			a.setState(shutdownReceived)
-		} else {
-			// No more outstanding, send shutdown ack.
-			a.willSendShutdownAck = true
-			a.setState(shutdownAckSent)
-
-			a.awakeWriteLoop()
-		}
+	if entersShutdownReceived(state) {
+		a.unblockPendingWrites()
 	}
+	a.finishShutdownHandling(state)
 
 	return nil
 }
@@ -3180,6 +3331,11 @@ func (a *Association) handleShutdownAck(_ *chunkShutdownAck) {
 	state := a.getState()
 	if state == shutdownSent || state == shutdownAckSent {
 		a.t2Shutdown.stop()
+		// A late SHUTDOWN ACK must never leave stale SHUTDOWN or SHUTDOWN ACK
+		// responses queued behind the terminal SHUTDOWN COMPLETE.
+		a.willSendShutdown = false
+		a.willSendShutdownAck = false
+		a.shutdownCompletePending = true
 		a.willSendShutdownComplete = true
 
 		a.awakeWriteLoop()
@@ -4089,6 +4245,26 @@ func shouldAbortOnChunkValidationError(receivedChunk chunk) bool {
 	}
 }
 
+// onShutdownTimeout retransmits the pending SHUTDOWN or SHUTDOWN ACK while
+// the handshake is still active. A timer event arriving after SHUTDOWN ACK has
+// been processed must not restart the handshake.
+// The caller should hold the lock.
+func (a *Association) onShutdownTimeout(nRtos uint) {
+	a.log.Debugf("[%s] retransmission of shutdown timeout (nRtos=%d): %v", a.name, nRtos)
+	if a.shutdownCompletePending {
+		return
+	}
+
+	switch a.getState() {
+	case shutdownSent:
+		a.willSendShutdown = true
+		a.awakeWriteLoop()
+	case shutdownAckSent:
+		a.willSendShutdownAck = true
+		a.awakeWriteLoop()
+	}
+}
+
 func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyclop
 	a.lock.Lock()
 	defer a.lock.Unlock()
@@ -4112,17 +4288,9 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 	}
 
 	if id == timerT2Shutdown {
-		a.log.Debugf("[%s] retransmission of shutdown timeout (nRtos=%d): %v", a.name, nRtos)
-		state := a.getState()
+		a.onShutdownTimeout(nRtos)
 
-		switch state {
-		case shutdownSent:
-			a.willSendShutdown = true
-			a.awakeWriteLoop()
-		case shutdownAckSent:
-			a.willSendShutdownAck = true
-			a.awakeWriteLoop()
-		}
+		return
 	}
 
 	if id == timerT3RTX { //nolint:nestif
